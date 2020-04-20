@@ -1,7 +1,11 @@
 from __future__ import unicode_literals
 
+import hashlib
+import string
+
 import django.db
 import django.db.models
+from django.contrib.auth.hashers import make_password
 from django.utils.six import PY2, string_types
 from django.utils.functional import cached_property
 from django.core import validators
@@ -189,3 +193,66 @@ class EncryptedPositiveSmallIntegerField(EncryptedNumberMixin, django.db.models.
 
 class EncryptedBigIntegerField(EncryptedNumberMixin, django.db.models.BigIntegerField):
     pass
+
+
+class SearchEncryptedFieldDescriptor(object):
+    def __init__(self, field):
+        self.field = field
+
+    def __get__(self, instance, owner):
+        if instance is None:
+            return self
+
+        if self.field.encrypted_field_name in instance.__dict__:
+            decrypted_value = instance.__dict__[self.field.encrypted_field_name]
+        else:
+            instance.refresh_from_db(fields=[self.field.encrypted_field_name])
+            decrypted_value = getattr(instance, self.field.encrypted_field_name)
+
+        instance.__dict__[self.field.name] = decrypted_value
+        return instance.__dict__[self.field.name]
+
+    def __set__(self, instance, value):
+        instance.__dict__[self.field.name] = value
+        # todo check if value is already hash, if not set the data in encrypted field as well
+        instance.__dict__[self.field.encrypted_field_name] = value
+
+
+class SearchEncryptedField(django.db.models.Field):
+    description = "Hashed data to search and filter values for an encryted field"
+    descriptor_class = SearchEncryptedFieldDescriptor
+
+    def __init__(self, hash_key=None, encrypted_field_name=None, *args, **kwargs):
+        if hash_key is None:
+            raise ImproperlyConfigured("Hash key must be supplied.")
+        self.hash_key = hash_key
+        if encrypted_field_name is None:
+            raise ImproperlyConfigured("Accompanying Encrypted field name is required to store the original value")
+        self.encrypted_field_name = encrypted_field_name
+        if kwargs.get('primary_key'):
+            raise ImproperlyConfigured("SearchEncryptedField does not support primary key")
+        kwargs['max_length'] = 64
+        super(SearchEncryptedField, self).__init__(*args, **kwargs)
+
+    def deconstruct(self):
+        name, path, args, kwargs = super(SearchEncryptedField, self).deconstruct()
+        if self.hash_key:
+            kwargs['hash_key'] = self.hash_key
+        if self.encrypted_field_name:
+            kwargs['encrypted_field_name'] = self.encrypted_field_name
+        return name, path, args, kwargs
+
+    def get_prep_value(self, value):
+        if value is None:
+            return value
+
+        # check if value is already hash, if yes return the value directly
+        value_to_hash = value + self.hash_key
+        return hashlib.sha256(value_to_hash.encode()).hexdigest()
+
+    def clean(self, value, model_instance):
+        return model_instance._meta.get_field(self.encrypted_field_name).clean(value, model_instance)
+
+    def contribute_to_class(self, cls, name, **kwargs):
+        super(SearchEncryptedField, self).contribute_to_class(cls, name, **kwargs)
+        setattr(cls, self.name, self.descriptor_class(self))
