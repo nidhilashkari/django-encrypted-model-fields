@@ -1,6 +1,7 @@
 from __future__ import unicode_literals
 
 import hashlib
+import re
 import string
 
 import django.db
@@ -195,6 +196,26 @@ class EncryptedBigIntegerField(EncryptedNumberMixin, django.db.models.BigInteger
     pass
 
 
+SEARCH_HASH_PREFIX = 'sha256$'
+SEARCH_HASH_REGEX = '^[A-Fa-f0-9]{64}$'
+
+
+def is_hashed(value):
+    if value is None:
+        return False
+
+    if not isinstance(value, str):
+        return False
+
+    if not value.startswith(SEARCH_HASH_PREFIX):
+        return False
+
+    hash = value[len(SEARCH_HASH_PREFIX):]
+    if not re.compile(SEARCH_HASH_REGEX).match(hash):
+        return False
+    return True
+
+
 class SearchEncryptedFieldDescriptor(object):
     def __init__(self, field):
         self.field = field
@@ -214,8 +235,8 @@ class SearchEncryptedFieldDescriptor(object):
 
     def __set__(self, instance, value):
         instance.__dict__[self.field.name] = value
-        # todo check if value is already hash, if not set the data in encrypted field as well
-        instance.__dict__[self.field.encrypted_field_name] = value
+        if not is_hashed(value):
+            instance.__dict__[self.field.encrypted_field_name] = value
 
 
 class SearchEncryptedField(django.db.models.Field):
@@ -246,7 +267,10 @@ class SearchEncryptedField(django.db.models.Field):
         if value is None:
             return value
 
-        # check if value is already hash, if yes return the value directly
+        # todo check if value is already hash, if yes return the value directly
+        if is_hashed(value):
+            return value
+
         value_to_hash = value + self.hash_key
         return hashlib.sha256(value_to_hash.encode()).hexdigest()
 
